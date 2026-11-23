@@ -1,9 +1,8 @@
 # PCA-EXP-4-MATRIX-ADDITION-WITH-UNIFIED-MEMORY AY 23-24
-<h3>AIM:</h3>
-<h3>ENTER YOUR NAME</h3>
-<h3>ENTER YOUR REGISTER NO</h3>
-<h3>EX. NO</h3>
-<h3>DATE</h3>
+<h3>NAME:HARIRAM R</h3>
+<h3>REGISTER NO:212224240050</h3>
+<h3>EX. NO:4</h3>
+<h3>DATE:23-11-26</h3>
 <h1> <align=center> MATRIX ADDITION WITH UNIFIED MEMORY </h3>
   Refer to the program sumMatrixGPUManaged.cu. Would removing the memsets below affect performance? If you can, check performance with nvprof or nvvp.</h3>
 
@@ -39,10 +38,194 @@ Allocate Host Memory
 22.	Reset the device using cudaDeviceReset and return from the main function.
 
 ## PROGRAM:
-TYPE YOUR CODE HERE
+```
+%%writefile unifmem1.cu
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+#include <cuda.h>
+#include <sys/time.h>
+
+#ifndef _COMMON_H
+#define _COMMON_H
+
+#define CHECK(call)                                                            \
+{                                                                              \
+    const cudaError_t error = call;                                            \
+    if (error != cudaSuccess)                                                  \
+    {                                                                          \
+        fprintf(stderr, "Error: %s:%d, ", __FILE__, __LINE__);                 \
+        fprintf(stderr, "code: %d, reason: %s\n", error,                       \
+                cudaGetErrorString(error));                                    \
+        exit(1);                                                               \
+    }                                                                          \
+}
+
+inline double seconds()
+{
+    struct timeval tp;
+    struct timezone tzp;
+    gettimeofday(&tp, &tzp);
+    return ((double)tp.tv_sec + (double)tp.tv_usec * 1.e-6);
+}
+
+#endif
+
+void initialData(float *ip, const int size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        ip[i] = (float)(rand() & 0xFF) / 10.0f;
+    }
+}
+
+void sumMatrixOnHost(float *A, float *B, float *C, const int nx, const int ny)
+{
+    for (int iy = 0; iy < ny; iy++)
+    {
+        for (int ix = 0; ix < nx; ix++)
+        {
+            C[iy * nx + ix] = A[iy * nx + ix] + B[iy * nx + ix];
+        }
+    }
+}
+
+void checkResult(float *hostRef, float *gpuRef, const int N)
+{
+    double epsilon = 1.0E-8;
+    bool match = 1;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (fabs(hostRef[i] - gpuRef[i]) > epsilon)
+        {
+            match = 0;
+            printf("host %f gpu %f\n", hostRef[i], gpuRef[i]);
+            break;
+        }
+    }
+
+    if (!match)
+        printf("Arrays do not match.\n\n");
+    else
+        printf("Arrays match!\n");
+}
+
+// Grid 2D block 2D
+__global__ void sumMatrixGPU(float *MatA, float *MatB, float *MatC,
+                             int nx, int ny)
+{
+    int ix = threadIdx.x + blockIdx.x * blockDim.x;
+    int iy = threadIdx.y + blockIdx.y * blockDim.y;
+
+    int idx = iy * nx + ix;
+
+    if (ix < nx && iy < ny)
+    {
+        MatC[idx] = MatA[idx] + MatB[idx];
+    }
+}
+
+int main(int argc, char **argv)
+{
+    printf("%s Starting ", argv[0]);
+
+    // Set up device
+    int dev = 0;
+    cudaDeviceProp deviceProp;
+    CHECK(cudaGetDeviceProperties(&deviceProp, dev));
+    printf("using Device %d: %s\n", dev, deviceProp.name);
+    CHECK(cudaSetDevice(dev));
+
+    // Set up data size of matrix
+    int nx, ny;
+    int ishift = 12;
+
+    if (argc > 1)
+        ishift = atoi(argv[1]);
+
+    nx = ny = 1 << ishift;
+
+    int nxy = nx * ny;
+    int nBytes = nxy * sizeof(float);
+
+    printf("Matrix size: nx %d ny %d\n", nx, ny);
+
+    // Allocate unified memory
+    float *A, *B, *hostRef, *gpuRef;
+
+    CHECK(cudaMallocManaged((void **)&A, nBytes));
+    CHECK(cudaMallocManaged((void **)&B, nBytes));
+    CHECK(cudaMallocManaged((void **)&gpuRef, nBytes));
+    CHECK(cudaMallocManaged((void **)&hostRef, nBytes));
+
+    // Initialize data
+    double iStart = seconds();
+
+    initialData(A, nxy);
+    initialData(B, nxy);
+
+    double iElaps = seconds() - iStart;
+    printf("initialization: \t %f sec\n", iElaps);
+
+    memset(hostRef, 0, nBytes);
+    memset(gpuRef, 0, nBytes);
+
+    // CPU matrix addition
+    iStart = seconds();
+    sumMatrixOnHost(A, B, hostRef, nx, ny);
+    iElaps = seconds() - iStart;
+
+    printf("sumMatrix on host:\t %f sec\n", iElaps);
+
+    // Configure kernel
+    int dimx = 32;
+    int dimy = 32;
+
+    dim3 block(dimx, dimy);
+    dim3 grid((nx + block.x - 1) / block.x,
+              (ny + block.y - 1) / block.y);
+
+    // Warm-up kernel
+    sumMatrixGPU<<<grid, block>>>(A, B, gpuRef, nx, ny);
+    CHECK(cudaDeviceSynchronize());
+
+    // GPU execution
+    iStart = seconds();
+
+    sumMatrixGPU<<<grid, block>>>(A, B, gpuRef, nx, ny);
+
+    CHECK(cudaDeviceSynchronize());
+
+    iElaps = seconds() - iStart;
+
+    printf("sumMatrix on gpu :\t %f sec <<<(%d,%d), (%d,%d)>>> \n",
+            iElaps, grid.x, grid.y, block.x, block.y);
+
+    // Check kernel error
+    CHECK(cudaGetLastError());
+
+    // Check results
+    checkResult(hostRef, gpuRef, nxy);
+
+    // Free memory
+    CHECK(cudaFree(A));
+    CHECK(cudaFree(B));
+    CHECK(cudaFree(hostRef));
+    CHECK(cudaFree(gpuRef));
+
+    // Reset device
+    CHECK(cudaDeviceReset());
+
+    return 0;
+}
+```
 
 ## OUTPUT:
-SHOW YOUR OUTPUT HERE
+<img width="1190" height="823" alt="Screenshot 2026-11-23 091605" src="https://github.com/user-attachments/assets/8eec42c0-979f-482e-a14e-9628ea8acf85" />
+<img width="1380" height="400" alt="Screenshot 2026-11-23 091623" src="https://github.com/user-attachments/assets/05bfcae6-0892-4741-989a-fb075989375b" />
+
+
 
 ## RESULT:
 Thus the program has been executed by using unified memory. It is observed that removing memset function has given less/more_______________time.
